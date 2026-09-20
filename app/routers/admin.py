@@ -58,6 +58,7 @@ async def tenant_actual(authorization: str = Header(...)) -> str:
 
 class ConductorCreate(BaseModel):
     nombre: str
+    app_id: str      # ID de acceso para la app móvil (ej: "CHOFER01") — único por tenant
     tel: str         # e.g. "+5491155556666"
     pin: str         # 4 dígitos — se guarda hasheado
 
@@ -85,32 +86,44 @@ async def crear_conductor(body: ConductorCreate, tenant_id: str = Depends(tenant
     """Crea un nuevo conductor con PIN hasheado."""
     if len(body.pin) < 4:
         raise HTTPException(status_code=422, detail="El PIN debe tener al menos 4 caracteres")
+    if not body.app_id or len(body.app_id.strip()) < 2:
+        raise HTTPException(status_code=422, detail="El ID de App debe tener al menos 2 caracteres")
 
     pin_hash = bcrypt.hash(body.pin)
+    app_id = body.app_id.strip().upper()
 
     pool = await get_pool()
     async with pool.acquire() as conn:
         # Verificar si el teléfono ya existe en este tenant
-        existing = await conn.fetchval(
+        existing_tel = await conn.fetchval(
             "SELECT id FROM choferes WHERE tel = $1 AND tenant_id = $2",
             body.tel, tenant_id,
         )
-        if existing:
+        if existing_tel:
             raise HTTPException(status_code=409, detail="Ya existe un conductor con ese teléfono")
+
+        # Verificar si el app_id ya existe en este tenant
+        existing_app = await conn.fetchval(
+            "SELECT id FROM choferes WHERE app_id = $1 AND tenant_id = $2",
+            app_id, tenant_id,
+        )
+        if existing_app:
+            raise HTTPException(status_code=409, detail="Ya existe un conductor con ese ID de App")
 
         row = await conn.fetchrow(
             """
-            INSERT INTO choferes (tenant_id, nombre, tel, pin_hash, activo)
-            VALUES ($1, $2, $3, $4, true)
-            RETURNING id, nombre, tel, activo, created_at
+            INSERT INTO choferes (tenant_id, nombre, tel, app_id, pin_hash, activo)
+            VALUES ($1, $2, $3, $4, $5, true)
+            RETURNING id, nombre, tel, app_id, activo, created_at
             """,
-            tenant_id, body.nombre, body.tel, pin_hash,
+            tenant_id, body.nombre, body.tel, app_id, pin_hash,
         )
 
     return {
         "id":         str(row["id"]),
         "nombre":     row["nombre"],
         "tel":        row["tel"],
+        "app_id":     row["app_id"],
         "activo":     row["activo"],
         "created_at": row["created_at"].isoformat(),
     }
@@ -123,7 +136,7 @@ async def listar_conductores(tenant_id: str = Depends(tenant_actual)):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, nombre, apellido, tel, activo, created_at
+            SELECT id, nombre, apellido, tel, app_id, activo, created_at
             FROM choferes
             WHERE tenant_id = $1
             ORDER BY nombre
@@ -135,6 +148,7 @@ async def listar_conductores(tenant_id: str = Depends(tenant_actual)):
             "id":         str(r["id"]),
             "nombre":     f"{r['nombre']} {r['apellido'] or ''}".strip(),
             "tel":        r["tel"],
+            "app_id":     r["app_id"],
             "activo":     r["activo"],
             "created_at": r["created_at"].isoformat(),
         }

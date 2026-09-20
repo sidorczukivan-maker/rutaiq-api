@@ -1,10 +1,10 @@
 """
-Endpoints para la app movil del chofer.
+Endpoints para la app móvil del chofer.
 
-POST /api/driver/login            -> login con tel + pin
-GET  /api/driver/ruta/hoy         -> ruta del dia con paradas
-POST /api/driver/paradas/{id}/evento -> reportar entrega/falla/foto
-POST /api/driver/gps              -> ping de posicion (cada ~60s)
+POST /api/driver/login            → login con app_id + pin
+GET  /api/driver/ruta/hoy         → ruta del día con paradas
+POST /api/driver/paradas/{id}/evento → reportar entrega/falla/foto
+POST /api/driver/gps              → ping de posición (cada ~60s)
 """
 
 from datetime import datetime, timedelta, timezone
@@ -21,19 +21,19 @@ from app.database import get_pool
 router = APIRouter(prefix="/api/driver", tags=["driver"])
 
 
-# -- Modelos --
+# ── Modelos ───────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    tel: str
-    pin: str
+    app_id: str    # ID de acceso que asigna el admin en el TMS (ej: "CHOFER01")
+    pin: str       # PIN de 4 dígitos que asigna el admin en el TMS
 
 class EventoRequest(BaseModel):
-    tipo: str
+    tipo: str                       # entregado | fallido | parcial | foto | comentario | reagendado
     lat: Optional[float] = None
     lng: Optional[float] = None
-    foto_url: Optional[str] = None
-    motivo: Optional[str] = None
-    bultos_real: Optional[int] = None
+    foto_url: Optional[str] = None  # URL subida a Supabase Storage
+    motivo: Optional[str] = None    # requerido si tipo = fallido | reagendado
+    bultos_real: Optional[int] = None  # entregados efectivamente (para "parcial")
 
 class GpsRequest(BaseModel):
     ruta_id: Optional[str] = None
@@ -44,7 +44,7 @@ class GpsRequest(BaseModel):
     heading: Optional[float] = None
 
 
-# -- Auth helpers --
+# ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def crear_token(chofer_id: str, tenant_id: str) -> str:
     payload = {
@@ -60,39 +60,45 @@ def decodificar_token(token: str) -> dict:
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Token invalido")
+        raise HTTPException(status_code=401, detail="Token inválido")
 
 async def chofer_actual(authorization: str = Header(...)) -> dict:
     if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Header de autorizacion invalido")
+        raise HTTPException(status_code=401, detail="Header de autorización inválido")
     return decodificar_token(authorization[7:])
 
 
-# -- Endpoints --
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/login")
 async def login(body: LoginRequest):
+    """
+    El chofer ingresa su ID de acceso y PIN.
+    El admin asigna ambos desde el TMS al crear o editar el chofer.
+    Devuelve un JWT válido por JWT_EXPIRE_HOURS horas.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT id, tenant_id, nombre, apellido, pin_hash, activo
             FROM choferes
-            WHERE tel = $1
+            WHERE app_id = $1
             LIMIT 1
             """,
-            body.tel,
+            body.app_id,
         )
 
     if not row:
-        raise HTTPException(status_code=401, detail="Telefono o PIN incorrectos")
+        raise HTTPException(status_code=401, detail="ID o PIN incorrectos")
 
     if not row["activo"]:
         raise HTTPException(status_code=403, detail="Chofer inactivo")
 
+    # Verificar PIN (guardado como bcrypt hash)
     from passlib.hash import bcrypt
     if not bcrypt.verify(body.pin, row["pin_hash"]):
-        raise HTTPException(status_code=401, detail="Telefono o PIN incorrectos")
+        raise HTTPException(status_code=401, detail="ID o PIN incorrectos")
 
     token = crear_token(str(row["id"]), str(row["tenant_id"]))
     return {
@@ -107,11 +113,16 @@ async def login(body: LoginRequest):
 
 @router.get("/ruta/hoy")
 async def ruta_hoy(driver: dict = Depends(chofer_actual)):
+    """
+    Devuelve la ruta asignada para hoy al chofer autenticado,
+    con todas sus paradas y el último evento de cada una.
+    """
     chofer_id = driver["sub"]
     hoy = datetime.now(timezone.utc).date()
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Ruta del día
         ruta = await conn.fetchrow(
             """
             SELECT r.id, r.fecha, r.estado, r.salida_plan, r.salida_real, r.notas,
@@ -128,8 +139,9 @@ async def ruta_hoy(driver: dict = Depends(chofer_actual)):
         )
 
         if not ruta:
-            raise HTTPException(status_code=404, detail="No tenes ruta asignada para hoy")
+            raise HTTPException(status_code=404, detail="No tenés ruta asignada para hoy")
 
+        # Paradas ordenadas
         paradas = await conn.fetch(
             """
             SELECT id, orden, cliente_nombre, direccion, lat, lng,
@@ -141,6 +153,7 @@ async def ruta_hoy(driver: dict = Depends(chofer_actual)):
             ruta["id"],
         )
 
+        # Último evento por parada
         parada_ids = [str(p["id"]) for p in paradas]
         eventos = {}
         if parada_ids:
@@ -156,9 +169,9 @@ async def ruta_hoy(driver: dict = Depends(chofer_actual)):
             )
             for ev in rows:
                 eventos[str(ev["parada_id"])] = {
-                    "tipo":        ev["tipo"],
-                    "timestamp":   ev["timestamp"].isoformat(),
-                    "motivo":      ev["motivo"],
+                    "tipo":       ev["tipo"],
+                    "timestamp":  ev["timestamp"].isoformat(),
+                    "motivo":     ev["motivo"],
                     "bultos_real": ev["bultos_real"],
                 }
 
@@ -196,6 +209,10 @@ async def registrar_evento(
     body: EventoRequest,
     driver: dict = Depends(chofer_actual),
 ):
+    """
+    El chofer registra lo que pasó en una parada:
+    entregado / fallido / parcial / foto / comentario / reagendado.
+    """
     TIPOS_VALIDOS = {"entregado", "fallido", "parcial", "foto", "comentario", "reagendado"}
     if body.tipo not in TIPOS_VALIDOS:
         raise HTTPException(status_code=422, detail=f"tipo debe ser uno de: {TIPOS_VALIDOS}")
@@ -207,6 +224,7 @@ async def registrar_evento(
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Verificar que la parada pertenece a una ruta de este chofer
         ok = await conn.fetchval(
             """
             SELECT 1
@@ -239,6 +257,10 @@ async def registrar_evento(
 
 @router.post("/gps")
 async def ping_gps(body: GpsRequest, driver: dict = Depends(chofer_actual)):
+    """
+    Ping de posición GPS. La app lo llama cada ~60 segundos mientras está en ruta.
+    El TMS lee estos pings desde la view ultima_posicion_choferes.
+    """
     chofer_id = driver["sub"]
 
     pool = await get_pool()
