@@ -5,3 +5,4 @@ python-dotenv>=1.0.0
 pyjwt>=2.8.0
 passlib[bcrypt]>=1.7.4
 pydantic-settings>=2.0.0
+# trigger redeploy
