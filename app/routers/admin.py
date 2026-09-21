@@ -1,5 +1,5 @@
 """
-Endpoints de administración para el TMS.
+Endpoints de administración para el TMS. - deploy trigger
 
 POST   /api/admin/conductores            → crear conductor (nombre, tel, pin)
 GET    /api/admin/conductores            → listar conductores de la org
