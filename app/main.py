@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
 
 from app.database import get_pool, close_pool
 from app.routers import admin, driver, tms
@@ -8,10 +8,8 @@ from app.routers import admin, driver, tms
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: inicializar pool de conexiones
     await get_pool()
     yield
-    # Shutdown: cerrar pool
     await close_pool()
 
 
@@ -21,12 +19,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r".*",  # refleja origin exacta (incluyendo null de file://)
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    """CORS manual: espeja la origin exacta, maneja preflights."""
+    origin = request.headers.get("origin", "")
+    if request.method == "OPTIONS":
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": origin or "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Max-Age": "3600",
+            },
+        )
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = origin or "*"
+    return response
+
 
 app.include_router(admin.router)
 app.include_router(driver.router)
