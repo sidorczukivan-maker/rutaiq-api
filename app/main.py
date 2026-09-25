@@ -23,7 +23,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*", "null"],  # "null" permite requests desde file:// y local
     allow_methods=["*"],
     allow_headers=["*"],
 )
