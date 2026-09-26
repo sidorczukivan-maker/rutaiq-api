@@ -34,6 +34,26 @@ async def cors_middleware(request: Request, call_next):
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
+@app.middleware("http")
+async def fix_content_type(request: Request, call_next):
+    """Rewrite text/plain -> application/json so Pydantic can parse the body."""
+    if request.method in ("POST", "PUT", "PATCH"):
+        ct = b""
+        for k, v in request.scope.get("headers", []):
+            if k == b"content-type":
+                ct = v
+                break
+        ct_str = ct.decode().lower()
+        if "application/json" not in ct_str:
+            new_headers = [
+                (k, v)
+                for k, v in request.scope.get("headers", [])
+                if k != b"content-type"
+            ]
+            new_headers.append((b"content-type", b"application/json"))
+            request.scope["headers"] = new_headers
+    return await call_next(request)
+
 app.include_router(admin.router)
 app.include_router(driver.router)
 app.include_router(tms.router)
